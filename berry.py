@@ -1,65 +1,68 @@
-import serial
-from flask import Flask, Response, request, redirect
-from flask_cors import CORS
+import cv2
+import tensorflow as tf
+from PIL import Image
 
-app = Flask(__name__)
-CORS(app)
+labels = ["accept", "reject", "none"]
+# .tflite 모델 파일 경로
+model_path = 'classify_plastic.tflite'
 
-ser = serial.Serial('COM5', 9600)  # 아두이노와 연결된 시리얼 포트를 사용합니다.
-# ser.open()
+# TensorFlow Lite 모델 로드
+interpreter = tf.lite.Interpreter(model_path=model_path)
+interpreter.allocate_tensors()
 
-def OpencvL():
-    return 3
+# 입력 및 출력 텐서 정보 가져오기
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
 
+def get_image():
+    capture = cv2.VideoCapture(0)
+    if not capture.isOpened(): #카메라가 정상 인식이 안되면
+        print('error : Can\'t detect camera. Please connect it again.')  # 카메라 재연결 하라는 오류 문구
+        return 0  # 종료
+    width = capture.get(3) #현재 영상의 너비
+    height = capture.get(4) #현재 영상의 높이
+    fps = capture.get(5) #현재 영상의 fps
 
-def OpencvR():
-    return 3
+    #각 프레임 초기화
+    _, frame = capture.read()
 
-@app.before_request
-def before_request():
-    if request.url.startswith('http://'):
-        url = request.url.replace('http://', 'https://', 1)
-        code = 301
-        return redirect(url, code=code)
+    def classify_image(image): # 이미지를 입력
+        # print(input_details[0]['shape'][1]) #모델 인풋 크기 224*224
+        # print(input_details[0]['shape'][2])
+        print(image.shape)
+        # 이미지 전처리: 리사이즈 및 정규화
+        # TODO: resize 전에 정사각형으로 crop 해야함
 
+        image = image[80:560, 0:480] #이미지 crop(640*480 -> 480*480)
+        image = cv2.resize(image, (input_details[0]['shape'][1], input_details[0]['shape'][2]))
+        cv2.imshow("frame", image)
+        image = image / 255.0  # 0~255 범위의 값을 0~1 범위로 정규화
 
-@app.route('/events')
-def events():
-    def generate():
-        count = 0
-        while True:
-            line = ser.readline().decode('utf-8')
-            input_chars = list(line)
+        image = tf.convert_to_tensor(image, dtype=tf.float32)
+        image = tf.expand_dims(image, axis=0)  # 배치 차원 추가
 
-            if input_chars[0] == 'L':
-                resultL = OpencvL()
-                if resultL == 0:
-                    input_chars[0] = 'x'
-                elif resultL == 1:
-                    input_chars[0] = 'y'
-                elif resultL == 2:
-                    input_chars[0] = 'z'
+        # 입력 텐서에 데이터 로드
+        interpreter.set_tensor(input_details[0]['index'], image)
 
-            if input_chars[1] == 'R':
-                resultR = OpencvR()
-                if resultR == 0:
-                    input_chars[1] = 'X'
-                elif resultR == 1:
-                    input_chars[1] = 'Y'
-                elif resultR == 2:
-                    input_chars[1] = 'Z'
+        # 모델 추론 실행
+        interpreter.invoke()
 
-            # time.sleep(0.2)
-            # print()
-            yield f"{''.join(input_chars)}\n"
+        # 출력 텐서에서 결과 가져오기
+        output_data = interpreter.get_tensor(output_details[0]['index'])
 
-            # count += 1
-    return Response(generate(), mimetype='text/event-stream')
+        # 결과 처리 - 가장 높은 확률을 가진 클래스 인덱스 가져오기
+        predicted_class_index = tf.argmax(output_data, axis=1)[0]
+        return predicted_class_index.numpy()
 
+    while capture.isOpened():
+        if cv2.waitKey(1) > 0: break #esc 누르면 종료
+        _, frame = capture.read()
+        # cv2.imshow("frame", frame)
+        class_index = classify_image(frame)
+        print(class_index)
+        # print(labels[class_index.numpy()])
+        print(labels[class_index])
 
+        if cv2.waitKey(1) > 0: break  # esc 누르면 종료
 
-if __name__ == '__main__':
-#    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS)
-#    ssl_context.load_cert_chain(certfile='newcert.pem', keyfile='newkey.pem', password='secret')
-#    app.run(host="0.0.0.0", port=443, ssl_context=ssl_context)
-     app.run(port=8888)
+get_image()
